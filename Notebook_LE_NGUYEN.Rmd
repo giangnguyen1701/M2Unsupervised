@@ -1,0 +1,509 @@
+---
+title: "Unsupervised Learning"
+output: html_document
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(caret)
+```
+
+
+
+# Exercice 1 Text base
+## Used functions
+```{r}
+## Return list of charactors of the text 
+normalise_text <- function(text){
+  text = text %>% unlist %>% paste(collapse=" ") %>% str_to_lower() %>% 
+    str_replace_all('[ùûü]','u') %>% 
+    str_replace_all('[ÿ]','y') %>% 
+    str_replace_all("[àâæ]",'a') %>% 
+    str_replace_all('[ç]','c')%>% 
+    str_replace_all('[éèêë]','e') %>% 
+    str_replace_all('[ïî]','i')%>% 
+    str_replace_all('[ôœ]','o')%>% 
+    strsplit(split="") %>% unlist %>% 
+    str_remove_all("[,.!`/|\"0123456789:;(?')-_]")
+  text = text[text != ""]
+  return(text)
+}
+
+## Unigram: vector of log-frequences of charactors
+unigram <- function(text){
+  # INPUT text: stardardized text
+  # OUTPUT X: vector of log-frequences of charactors
+  text<-table(text)
+  letters_space<-c(letters," ")
+  X<-as.data.frame(matrix(0,1,27))
+  colnames(X)<-letters_space
+  for (l in letters_space){
+    X[1, which(names(X) == l)] = text[l]
+  }
+  X[is.na(X)]<-0
+  X = X + 1 #add-1 smoothing
+  X = X/sum(X)
+  X<-log(1+X)
+  return(X)
+}
+```
+
+## 1.1 Loading data 
+```{r warning=FALSE}
+#Loading data y=-1 means English and y=1 means French
+text_original = vector(mode='list') #list of original texts
+text_normalise = vector(mode='list') #list of standardized texts
+y = vector(mode='numeric')
+for (name in list.files('./Lyrics/')){
+  if (substr(name, nchar(name)-2,nchar(name)) == 'txt'){
+    text = readLines(paste('./Lyrics/',name, sep = ""), encoding='UTF-8')
+    text_original = append(text_original, list(text))
+    text = normalise_text(text)
+    text_normalise = append(text_normalise, list(text))
+    y = append(y, if (substr(name,1,2)=='EN') 1 else -1)
+  }
+}
+y #vector of text's labels
+n=length(y)
+s=sample(1:n,1)
+text_original[[s]]
+text_normalise[[s]]
+
+```
+
+## 1.2 Log-frequences of charactors
+```{r}
+letters_space<-c(letters," ")
+#matrix storing all the vectors of log-frequences by row
+X_unigram = data.frame(matrix(vector(), 0, 27)) 
+colnames(X_unigram)<-letters_space
+
+for (i in 1:n){
+  text<-unigram(text_normalise[i])
+  X_unigram = bind_rows(X_unigram,text)
+}
+
+X_unigram
+```
+
+## 1.3 Histogram of log-frequnces of charactors
+```{r}
+for (cha in letters_space){
+  X_EN = X_unigram[y==1,cha]
+  X_FR = X_unigram[y==-1,cha]
+  hist(X_EN, col=rgb(1,0,0,0.5), ylim=c(0,30), xlim=c(0,0.22), xlab= "log-frequency", main= cha)
+  hist(X_FR, col=rgb(0,0,1,0.5), add=T)
+  box()
+}
+```
+The distribution of log-frequency of characters in EN and FR are different. 
+
+# Exercice 2 Naive Bayes classification
+## Used function
+```{r}
+#Function return parameters of Naive Bayes classification: 
+bayes_naif <- function(X,y){
+  # INPUT X: is matrix log_frequences of charactors
+  # OUTPUT class: name of the k class
+  #        p_0: propri probabilitiy for each class
+  #        m: mean of each variable for each class
+  #        sigma: covariance matrix for each class (diagnosed matrix)
+  classname = unique(y)
+  nclass = length(classname)
+  ncovariate = ncol(X)
+  
+  p_0 = rep(0, nclass) # Priori probabilities
+  for (i in 1:nclass){
+    p_0[i] = sum(y==classname[i])/length(y)
+  }
+  m = matrix(0,ncovariate,nclass)#Mean
+  rownames(m) = c(letters," ")
+  colnames(m) = classname
+  sigma = m #Variance
+  for (i in 1:nclass){
+    m[,i] = colMeans(X[y==classname[i],])
+    sigma[,i] = diag(var(X[y==classname[i],]))
+  }
+  return(list(class=classname,p_0=p_0,m=m,sigma=sigma))
+}
+
+prediction_bayes <- function(para,X){
+  # INPUT para: parameters for Naive Bayes classification, output of the bayes_naif function
+  # OUTPUT class: name of the k class
+  #        posterior: posterior probabilitiy for each class
+  #        prediction: predicted class for each observation 
+  nclass = length(para$class)
+  prob = matrix(0, nrow(X), nclass)
+  colnames(prob) = para$class
+  for (i in 1:nclass){
+    prob[,i] = apply(X, 1, function(x) para$p_0[i]*prod(dnorm(x, para$m[,i], sqrt(para$sigma[,i]))))
+  }
+  posterior = t(apply(prob, 1, function(x) x/sum(x)))
+  prediction = apply(posterior, 1, function(x) para$class[which.max(x)])
+  return(list(class=para$class,posterior=posterior,prediction=prediction))
+}
+```
+## 2.1 Estimation of parameters
+```{r}
+para=bayes_naif(X_unigram,y)
+para
+```
+## 2.2 Classification
+```{r}
+y_pred_bayes_naif = prediction_bayes(para,X_unigram)
+y_pred_bayes_naif
+y_pred_bayes_naif$prediction == y
+```
+## 2.3 Cross validation
+```{r}
+# Stratified k-folds
+folds = 5
+n=length(y)
+cvIndex <- createFolds(y, folds, returnTrain = F)
+pred_cv_bayes_naif = rep(0,n)
+for (i in 1:folds){
+  test_id = cvIndex[[i]]
+  para = bayes_naif(X_unigram[-test_id,],y[-test_id])
+  pred_cv_bayes_naif[test_id] = prediction_bayes(para,X_unigram[test_id,])$prediction
+}
+pred_cv_bayes_naif == y
+```
+```{r}
+# unstratified k-folds
+folds = 5
+n=length(y)
+cvIndex <- createFolds(1:n, folds, returnTrain = F)
+pred_cv_bayes_naif = rep(0,n)
+for (i in 1:folds){
+  test_id = cvIndex[[i]]
+  para = bayes_naif(X_unigram[-test_id,],y[-test_id])
+  pred_cv_bayes_naif[test_id] = prediction_bayes(para,X_unigram[test_id,])$prediction
+}
+pred_cv_bayes_naif == y
+```
+# Exercice 3 Markov classification
+## Used functions
+```{r}
+## Bigram: return the list of matrix of transition for each text 
+bigram <- function(text){
+  # INPUT X: is matrix log_frequences of charactors
+  # OUTPUT class: name of the k class
+  #        p_0: propri probabilitiy for each class
+  #        A: matrix of transition for each class
+  letters_space<-c(letters," ")
+  X<-matrix(0,27,27)
+  row.names(X)<-letters_space
+  colnames(X)<-letters_space
+  text1<-c(" ",text)
+  text2<-c(text," ")
+  bigrams<-table(text1, text2)
+  
+  for (letteri in letters_space)
+    for (letterj in letters_space)
+      if ((letteri %in% row.names(bigrams))&&(letterj %in% row.names(bigrams))) X[letteri,letterj]<-bigrams[letteri,letterj]
+  X <- X
+  return(X)
+}
+
+## Estimation of parameters with add-1 smoothing
+markovien <- function(X,y){
+  letters_space<-c(letters," ")
+  n = length(y)
+  classname = unique(y)
+  nclass = length(classname)
+  A <- vector(mode = "list", length = nclass)
+  for (k in classname){
+    MT<-matrix(0,27,27)
+    row.names(MT)<-letters_space
+    colnames(MT)<-letters_space
+    for (i in which(y==k)){
+      MT <- MT + X[[i]]
+    }
+    A[[k]] <- t(apply(MT+1, 1, function(x) x/sum(x))) #add-1 smoothing
+  }
+  
+  #pi_0 <-matrix(0,27,2)
+  #row.names(pi_0) = letters_space
+  #for (i in 1:nclass){
+    #K=nrow(A[[i]])
+    #M=diag(rep(1,K)) - A[[i]]
+    #M[,K]=rep(1,K)
+    #pi_0[,i]=solve(t(M), b= c(rep(0, K-1),1))
+    #pi_0[,i] = A[[i]][" ",]
+  #}
+  p_0 = rep(0, nclass) #Probabilité initiale
+  for (i in 1:nclass){
+    p_0[i] = sum(y==classname[i])/length(y)
+  }
+  return(list(classname=classname,p_0=p_0,A=A))
+}
+
+## Prediction 
+prediction_markovien <- function(para, X){
+  # INPUT para: parameters for Markovien classification, output of the markovien function
+  # OUTPUT class: name of the k class
+  #        log_posterior: logarit posterior probabilitiy for each class
+  #        prediction: predicted class for each observation
+  nclass = length(para$class)
+  log_posterior = matrix(0, length(X), nclass)
+  colnames(log_posterior) = para$class
+  for (k in 1:nclass){
+    for (i in 1:length(X)){
+      log_posterior[i,k]=sum(log(para$A[[k]])*X[[i]])+log(para$p_0[k])
+    }
+  }
+  prediction = apply(log_posterior, 1, function(x) para$class[which.max(x)])
+  return(list(class=para$class,log_posterior=log_posterior,prediction=prediction))
+}
+```
+
+## 3.1 Estimation of parameters
+```{r}
+X_bigram = vector(mode='list')
+for (i in 1:n){
+  X_bigram[[i]]<-bigram(text_normalise[[i]])
+}
+para=markovien(X_bigram,y)
+para
+```
+## 3.2 Classification
+```{r}
+y_pred_markovien = prediction_markovien(para,X_bigram)
+y_pred_markovien
+y_pred_markovien$prediction == y
+```
+## 2.3 Cross validation
+```{r}
+# Stratified k-folds
+folds = 5
+n=length(y)
+cvIndex <- createFolds(y, folds, returnTrain = F)
+pred_cv_markovien = rep(0,n)
+for (i in 1:folds){
+  test_id = cvIndex[[i]]
+  para = markovien(X_bigram[-test_id],y[-test_id])
+  pred_cv_markovien[test_id] = prediction_markovien(para,X_bigram[test_id])$prediction
+}
+pred_cv_bayes_naif == y
+```
+```{r}
+# unstratified k-folds
+folds = 5
+n=length(y)
+cvIndex <- createFolds(1:n, folds, returnTrain = F)
+pred_cv_markovien = rep(0,n)
+for (i in 1:folds){
+  test_id = cvIndex[[i]]
+  para = markovien(X_bigram[-test_id],y[-test_id])
+  pred_cv_markovien[test_id] = prediction_markovien(para,X_bigram[test_id])$prediction
+}
+pred_cv_markovien == y
+```
+# Exercice 4 Viterbi
+## Used function
+```{r}
+
+Viterbi<-function(Pi,A,B,X,classname){
+  # INPUT X: text made by random phares
+  #       Pi: initial probabilitiy of Markov chain
+  #       A: trainsition matrix
+  #       B: law of distribution for each state 
+  # OUTPUT Zest
+  n<-length(X)
+  K<-nrow(A)
+  log_P<-matrix(0,K,n)
+  for (i in 1:n){
+    X_normalise = normalise_text(X[i])
+    X_bigrams = bigram(X_normalise)
+    for (k in 1:K){
+      log_P[k,i] = sum(log(B[[k]])*X_bigrams)
+    }
+  }
+  S<-matrix(0,K,n)
+  logV<-matrix(0,K,n)
+  Zest<-rep(0,n)
+  for (k in 1:K){
+    logV[k,1]<-log_P[k,1]+log(Pi[k])
+  }
+  # Forward
+  for (t in (2:n))
+    for (k in (1:K)){
+      logV[k,t]=max(logV[,t-1]+log(A[,k])+log_P[k,t])
+      S[k,t-1]=which.max(logV[,t-1]+log(A[,k])+log_P[k,t])
+    }
+  # Backward
+  Zest[n]<-classname[which.max(logV[,n])]
+  for (t in (n-1):1)
+    Zest[t]<-classname[S[Zest[t+1],t]]
+  return(Zest)
+}
+```
+## Initial parameters
+```{r}
+#Transition matrix between EN-FR
+A_text = matrix(c(0.8,0.2,0.2,0.8),2,2)
+#Initial probability 
+pi_text = c(1/2,1/2)
+```
+## 4.1 Random text
+```{r}
+set.seed(111)
+y_viterbi = rep(0,30)
+y_viterbi[1] = sample(c(-1,1),1,prob = pi_text)
+for (i in 2:length(y_viterbi)){
+  if (y_viterbi[i-1] == 1) p = A_text[1,]
+  else p = A_text[2,]
+  y_viterbi[i] = sample(c(1,-1),1,prob = p)
+}
+y_viterbi
+
+text_viterbi = vector(mode='list')
+for (i in 1:length(y_viterbi)){
+  index = sample(which(y==y_viterbi[i]),1)
+  text_viterbi[i] = text_original[[index]][sample(1:length(text_original[[index]]),1)]
+}
+
+text_viterbi = unlist(text_viterbi)
+text_viterbi
+```
+## 4.2 Viterbi for detection passages in French and English of the fabricated text
+```{r}
+para=markovien(X_bigram,y)
+Pi = pi_text
+A = A_text
+B = para$A
+X = text_viterbi
+
+Viterbi(Pi,A,B,text_viterbi,c(1,-1))
+Viterbi(Pi,A,B,text_viterbi,c(1,-1))==y_viterbi
+```
+# Exercice 5 Algorithme of Baum-Welch
+## 5.1 EM method
+```{r}
+EM_text <- function(text, add_smooth = 1/100, scale = 1){
+  # INPUT text: list of text
+  #       add_smooth: 
+  #       scale: value for scale adjusting
+  # OUTPUT X: scaled bigram matrices for each text 
+  X = text
+  X = X %>% lapply( function(x) normalise_text(x))
+  X = X  %>% lapply( function(x) (bigram(x)+add_smooth)/scale) # like add-1 smoothing but a small number because the short length of text and reduct scale of matrix bigram
+  return(X)
+}
+
+EM <- function(X, Pi, A, B, classname, threshold = 10^-4, print = TRUE){
+  # INPUT X: scaled bigram matrices for each text
+  #       Pi, A, B: initial parameters of Markov chain
+  #       classname: vector of class's name
+  #       threshold: threshold in change of log-likelihood for early stopping
+  #       print: print the log-likelihood for each iteration or not
+  # OUTPUT prediction: prediction class for each phares
+  #        Pi, A, B: estimated parameters of EM
+  nclass = length(classname)
+  loglikelihood_old = -10^6
+  loglikelihood = 0
+  n=length(X)
+  Pi_new = Pi
+  A_new = A
+  B_new = B
+  #set.seed(123)
+  for (i in 1:nclass){
+    B[[i]][,] =runif(27*27)
+    B[[i]]=t(apply(B[[i]],1,function(x)x/sum(x)))
+  }
+  
+  ## EM algorithmn:
+  while(abs(1-loglikelihood/loglikelihood_old)>threshold){
+    loglikelihood_old = loglikelihood
+    Pi=Pi_new
+    A=A_new
+    B=B_new
+    # E-step:
+    Px_z = matrix(0,nclass,n) #emission density of each phrase
+    for (k in 1:nclass){
+      for (i in 1:n){
+        Px_z[k,i] = exp(sum(log(B[[k]])*(X[[i]])))
+      }
+    }
+    
+    Z=rep(0,n)
+    a=matrix(0,nclass,n) #the filtered marginal: alpha
+    
+    Z[1]=sum(Px_z[,1]*Pi)
+    a[,1]=Px_z[,1]*Pi/Z[1]
+    
+    for (i in 2:n){
+      Z[i]=sum(Px_z[,i]*(t(A)%*%a[,i-1]))
+      a[,i]=Px_z[,i]*(t(A)%*%a[,i-1])/Z[i]
+    }
+    loglikelihood = sum(log(Z)) #log-likelihood of the evidence
+    print(loglikelihood)
+    b=matrix(0,nclass,n) #the conditional likelihood of future evidence: beta
+    b[,n]=1
+    
+    for (i in (n-1):1){
+      bn = b[,i+1]/b[1,i+1]
+      b[,i]=A%*%(Px_z[,i+1]*bn)
+      #b[,i]=A%*%(Px_z[,i+1]*b[,i+1])
+    }
+    
+    g=apply(a*b,2,function(x) x/sum(x)) #smoothed posterior marginal: gamma
+    
+    At = vector(mode='list') #two-slice marginal: epsilon
+    for (i in 1:(n-1)){
+      tran = A * (a[,i]%*%t(Px_z[,i+1]*b[,i+1]))
+      At[[i]] = t(apply(tran, 1, function(x) x/sum(x)))
+    }
+    
+    # M-step:
+    
+    Pi_new = g[,1]
+    A_new = matrix(0,nclass,2)
+    for (i in 1:(n-1)){
+      A_new = A_new + At[[i]]
+    }
+    A_new=t(apply(A_new,1,function(x) x/sum(x)))
+    
+    B_new = vector(mode='list')
+    for (k in 1:nclass){
+      MT = matrix(0,27,27)
+      for (i in 1:n){
+        MT = MT+g[k,i]*X[[i]]
+      }
+      MT = t(apply(MT,1,function(x) x/sum(x)))
+      B_new[[k]] = MT
+    }
+  }
+  pred = apply(g[,1:n],2,function(x) classname[which.max(x)])
+  return(list(prediction=pred,Pi=Pi,A=A,B=B))
+}
+```
+## 5.2 Using Viterbi parameters
+```{r}
+para=markovien(EM_text(text_original, 1, 1), y)
+Pi = pi_text
+A = A_text
+B = para$A
+
+X = EM_text(text_viterbi, 1/100, 1)
+pred = EM(X, Pi, A, B, c(1,-1))$prediction
+pred == y_viterbi
+```
+## 5.3 Using random parameters
+```{r}
+para=markovien(EM_text(text_original, 1, 1), y)
+Pi = pi_text
+A = A_text
+B = para$A
+
+B[[1]][,] =runif(27*27)
+B[[2]][,] =runif(27*27)
+B[[1]]=t(apply(B[[1]],1,function(x)x/sum(x)))
+B[[2]]=t(apply(B[[2]],1,function(x)x/sum(x)))
+
+X = EM_text(text_viterbi, 1/100, 1)
+pred = EM(X, Pi, A, B, c(1,-1))$prediction
+pred == y_viterbi
+```
+
